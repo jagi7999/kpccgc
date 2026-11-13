@@ -1293,7 +1293,7 @@ async function showTab(name){
   if(name==='state') renderState();
   if(name==='hier') renderHier();
   if(name==='me') renderMe();
-  if(name==='directory' && entering) resetDirectoryView();
+  if(name==='directory' && entering){ resetDirectoryView(); try{ openDirectoryForSession(); }catch(e){ console.warn(e); } }
   if(name==='keyverify') kvRender();
   if(name==='events') renderEvents();
 }
@@ -3647,6 +3647,7 @@ function resetDirectoryView(){
   document.getElementById('d_otp').value = '';
   pendingGbaOtp = null;
   guest = null;
+  if(session){ try{ openDirectoryForSession(); }catch(e){} }
 }
 
 function genOtp6(){
@@ -3669,9 +3670,10 @@ function onGbaSelectedForOtp(){
   document.getElementById('otpDisplayBox').classList.remove('hidden');
 }
 
-function sendGuestOtp(){
+const last10=x=>String(x==null?'':x).replace(/\D/g,'').slice(-10);
+async function sendGuestOtp(){
   const gba = document.getElementById('d_gba').value;
-  const mobile = document.getElementById('d_mobile').value.trim();
+  const mobile = last10(document.getElementById('d_mobile').value);
   if(!gba || !mobile || mobile.length!==10){
     document.getElementById('dirMsg').textContent = '⚠ Select GBA and enter a valid 10-digit mobile number.';
     return;
@@ -3679,10 +3681,16 @@ function sendGuestOtp(){
   if(!pendingGbaOtp){
     onGbaSelectedForOtp(); // safety net if OTP wasn't generated yet
   }
+  // make sure the member list is fresh before checking (a stale/empty cache was rejecting valid members)
+  if(DB_MODE==='turso'){ document.getElementById('dirMsg').textContent='⏳ Checking…'; try{ await pullFromTurso(); }catch(e){} document.getElementById('dirMsg').textContent=''; }
   const members = ls('kpcc_v2_members')||[];
-  const self = members.find(m=>m.gba===gba && m.mobile===mobile && m.status==='verified' && m.active!==false);
+  const self = members.find(m=>m.gba===gba && last10(m.mobile)===mobile && m.status==='verified' && m.active!==false);
   if(!self){
-    document.getElementById('dirMsg').textContent = '⚠ This mobile number is not a verified enrolled member of the selected GBA.';
+    const any = members.find(m=>last10(m.mobile)===mobile);
+    document.getElementById('dirMsg').textContent = !any ? '⚠ This mobile number is not enrolled. Use the mobile you registered with.'
+      : any.gba!==gba ? '⚠ This mobile is enrolled in '+any.gba+', not '+gba+'. Select your own GBA.'
+      : any.active===false ? '⚠ This membership is disabled. Contact your GBA President.'
+      : '⚠ Your enrollment is still '+any.status+'. The directory opens after verification.';
     return;
   }
   guest = {mobile, gba, otp: pendingGbaOtp, verified:false};
@@ -3699,6 +3707,11 @@ function verifyGuestOtp(){
     return;
   }
   guest.verified = true;
+  enterDirectoryView();
+}
+function dirHomeTab(){ return !session?'enroll':session.role==='admin'?'admin':session.role==='state'?'state':session.role==='member'?'me':'president'; }
+function enterDirectoryView(){
+  const lb=document.querySelector('#dirViewBox button[onclick="guestLogOff()"]'); if(lb) lb.textContent=session?'← Back':'🚪 Log Off';
   guest.viewGba = guest.gba;
   document.getElementById('dirLoginBox').classList.add('hidden');
   document.getElementById('dirViewBox').classList.remove('hidden');
@@ -3707,9 +3720,17 @@ function verifyGuestOtp(){
   document.getElementById('dirSearch').value='';
   loadDirGba(guest.gba);
 }
+/* Logged-in users are already authenticated, so they open the Directory directly (no OTP) */
+function openDirectoryForSession(){
+  if(!session) return false;
+  const gba = session.gba || GBAS.find(g=>g!=='Others'&&isGbaActive(g)) || GBAS[0];
+  guest = {mobile: session.mobile || ('@'+(session.username||session.role)), gba, otp:'', verified:true};
+  enterDirectoryView();
+  return true;
+}
 function loadDirGba(g){
   guest.viewGba=g;
-  guest.list=(ls('kpcc_v2_members')||[]).filter(m=>m.gba===g && m.status==='verified' && m.active!==false && m.mobile!==guest.mobile);
+  guest.list=(ls('kpcc_v2_members')||[]).filter(m=>m.gba===g && m.status==='verified' && m.active!==false && last10(m.mobile)!==last10(guest.mobile));
   guest.idx=-1;
   document.getElementById('dirGbaTitle').textContent='Directory — '+g+(g!==guest.gba?' (viewing from '+guest.gba+')':'');
   document.getElementById('dirNextBtn').classList.remove('hidden');
@@ -3771,6 +3792,7 @@ async function logGuestView(m){
 }
 
 function guestLogOff(){
+  if(session){ showTab(dirHomeTab()); return; } // logged-in users just go back; OTP screen is for guests only
   toast('Logged off. Session ended.');
   resetDirectoryView();
   document.getElementById('d_gba').value = '';
